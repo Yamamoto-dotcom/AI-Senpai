@@ -112,30 +112,40 @@ if prompt := st.chat_input("質問をどうぞ"):
     if answered_by_faq:
         source_question = faq_df.iloc[I[0][0]]["question"]
         response = faq_df.iloc[I[0][0]]["answer"]
-    else:
+        else:
         # 検索結果をコンテキストとして Gemini に投げる
         context = ""
         if similarity > 0.2:  # 一応近いものがあれば
-            context = f"参考になりそうな FAQ:\nQ: {faq_df.iloc[I[0][0]]['question']}\nA: {faq_df.iloc[I[0][0]]['answer']}\n---"
+            context = (
+                f"参考になりそうな FAQ:\n"
+                f"Q: {faq_df.iloc[I[0][0]]['question']}\n"
+                f"A: {faq_df.iloc[I[0][0]]['answer']}\n---"
+            )
 
-        # 120 行目付近をまるごと置き換え
-system_prompt = (
-    'あなたは大学の先輩チャットボット "AI先輩" です。'
-    'ユーザーの質問に日本語で端的かつ丁寧に答えてください。'
-)
+        system_prompt = (
+            'あなたは大学の先輩チャットボット "AI先輩" です。'
+            'ユーザーの質問に日本語で端的かつ丁寧に答えてください。'
+        )
         full_prompt = f"{context}\nユーザーの質問: {prompt}"
+
         try:
             gen_response = genai.generate_content(
                 model=CHAT_MODEL,
                 contents=[
                     {"role": "system", "parts": [{"text": system_prompt}]},
-                    {"role": "user", "parts": [{"text": full_prompt}]},
+                    {"role": "user",   "parts": [{"text": full_prompt}]},
                 ],
-                safety_settings={"category":"HARM_CATEGORY_DANGEROUS","threshold":"BLOCK_NONE"}
+                safety_settings={
+                    "category": "HARM_CATEGORY_DANGEROUS",
+                    "threshold": "BLOCK_NONE",
+                },
             )
             response = gen_response.candidates[0].content.parts[0].text
         except Exception as e:
-            response = "申し訳ありません、回答生成中にエラーが発生しました。後でもう一度お試しください。"
+            response = (
+                "申し訳ありません、回答生成中にエラーが発生しました。"
+                "後でもう一度お試しください。"
+            )
             logging.exception(e)
 
     # Display assistant response
