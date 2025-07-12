@@ -112,7 +112,7 @@ if prompt := st.chat_input("質問をどうぞ"):
     if answered_by_faq:
         source_question = faq_df.iloc[I[0][0]]["question"]
         response = faq_df.iloc[I[0][0]]["answer"]
-        else:
+    else:
         # 検索結果をコンテキストとして Gemini に投げる
         context = ""
         if similarity > 0.2:  # 一応近いものがあれば
