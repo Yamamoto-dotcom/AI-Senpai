@@ -107,3 +107,37 @@ if q := st.chat_input("質問をどうぞ"):
     st.chat_message("assistant").markdown(final)
     st.session_state.hist.append(("assistant", final))
     jl_append(CHAT_LOG, {"ts":time.time(),"q":q,"a":final,"faq_hit":hit})
+
+# ───────── 管理者ログダウンロード ─────────
+with st.sidebar:
+    st.subheader("📥 管理者用ログダウンロード")
+
+    admin_key = st.text_input("🔑 管理者キー", type="password")
+    correct_key = os.getenv("ADMIN_KEY")
+
+    if admin_key and admin_key == correct_key:
+        st.success("✅ 管理者認証成功")
+
+        if CHAT_LOG.exists():
+            with open(CHAT_LOG, "rb") as f:
+                st.download_button(
+                    label="📄 回答済みログをダウンロード",
+                    data=f,
+                    file_name="chat_logs.jsonl",
+                    mime="application/jsonl"
+                )
+        else:
+            st.info("回答済みログがまだ存在しません。")
+
+        if Path("logs/unanswered.jsonl").exists():
+            with open("logs/unanswered.jsonl", "rb") as f:
+                st.download_button(
+                    label="📄 未回答ログをダウンロード",
+                    data=f,
+                    file_name="unanswered.jsonl",
+                    mime="application/jsonl"
+                )
+        else:
+            st.info("未回答ログがまだ存在しません。")
+    elif admin_key and admin_key != correct_key:
+        st.error("❌ 認証失敗：管理者キーが間違っています。")
