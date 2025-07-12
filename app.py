@@ -118,10 +118,11 @@ if prompt := st.chat_input("質問をどうぞ"):
         if similarity > 0.2:  # 一応近いものがあれば
             context = f"参考になりそうな FAQ:\nQ: {faq_df.iloc[I[0][0]]['question']}\nA: {faq_df.iloc[I[0][0]]['answer']}\n---"
 
-        system_prompt = (
-            "あなたは大学の先輩チャットボット "AI先輩" です。"
-            "ユーザーの質問に日本語で端的かつ丁寧に答えてください。"
-        )
+        # 120 行目付近をまるごと置き換え
+system_prompt = (
+    'あなたは大学の先輩チャットボット "AI先輩" です。'
+    'ユーザーの質問に日本語で端的かつ丁寧に答えてください。'
+)
         full_prompt = f"{context}\nユーザーの質問: {prompt}"
         try:
             gen_response = genai.generate_content(
