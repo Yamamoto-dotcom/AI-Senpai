@@ -110,7 +110,7 @@ if q := st.chat_input("質問をどうぞ"):
 
 # ───────── 管理者ログダウンロード ─────────
 with st.sidebar:
-    st.subheader("📥 管理者用ログダウンロード")
+    st.subheader("📥 管理者認証")
 
     admin_key = st.text_input("🔑 管理者キー", type="password")
     correct_key = os.getenv("ADMIN_KEY")
