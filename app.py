@@ -159,13 +159,7 @@ if prompt := st.chat_input("質問をどうぞ"):
 
     # Caption for debug
     assistant_box.caption(f"FAQ 類似度: {similarity:.2f} / マッチ: {answered_by_faq}")
-
-    # --- JSON に安全に変換できるように保険 ------------------
-if not isinstance(response, str):
-    response = str(response)
-if not isinstance(similarity, float):
-    similarity = float(similarity)
-# -----------------------------------------------------------
+    
     # Logging
     log_entry = {
         "ts": time.time(),
