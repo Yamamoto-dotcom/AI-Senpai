@@ -1,5 +1,4 @@
-# ─────────── app.py  (faiss不要版) ───────────
-import os, json, time, logging
+import os, json, time
 from pathlib import Path
 
 import streamlit as st
@@ -8,132 +7,98 @@ import numpy as np
 from dotenv import load_dotenv
 import google.generativeai as genai
 
-# ---------------- CONFIG --------------------
-EMBED_MODEL   = "models/embedding-001"
-CHAT_MODEL    = "models/gemini-1.5-flash-latest"
-COS_THRESHOLD = 0.30        # FAQ を採用するコサイン類似度
-TOP_K         = 3           # FAQ 上位何件を取得するか
+# ---------- CONFIG ----------
+EMBED_MODEL = "models/embedding-001"
+CHAT_MODEL  = "models/gemini-1.5-flash-latest"
 
-LOG_DIR = Path("logs"); LOG_DIR.mkdir(exist_ok=True)
-CHAT_LOG = LOG_DIR / "chat_logs.jsonl"
-UNANS_LOG = LOG_DIR / "unanswered.jsonl"
+TOP_K       = 5      # FAQ を渡す上位件数
+SIM_FLOOR   = 0.15   # これ未満は FAQ を無理に渡さない
+LOG_DIR     = Path("logs"); LOG_DIR.mkdir(exist_ok=True)
+CHAT_LOG    = LOG_DIR / "chat_logs.jsonl"
 
+# ---------- UTILS -----------
+def save_jsonl(path: Path, data: dict):
+    safe = {k: (v if isinstance(v,(str,int,float,bool,type(None))) else str(v))
+            for k,v in data.items()}
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(safe, ensure_ascii=False) + "\n")
+
+# ---------- API KEY ----------
+load_dotenv(); key = os.getenv("GOOGLE_API_KEY")
+if not key: st.error("GOOGLE_API_KEY が未設定です"); st.stop()
+genai.configure(api_key=key)
+
+# ---------- FAQ LOAD ---------
+@st.cache_resource(show_spinner="FAQ を読み込み中…")
+def load_faq(csv="faq.csv"):
+    df = pd.read_csv(csv)
+    vecs = [
+        genai.embed_content(model=EMBED_MODEL,
+                            content=q,
+                            task_type="retrieval_query")["embedding"]
+        for q in df["question"]
+    ]
+    vecs = np.asarray(vecs, dtype="float32")
+    vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
+    return df, vecs
+faq_df, faq_vecs = load_faq()
+
+def top_k(q_vec, k=TOP_K):
+    q = q_vec / np.linalg.norm(q_vec)
+    sims = faq_vecs @ q
+    idx  = sims.argsort()[-k:][::-1]
+    return sims[idx], idx
+
+# ---------- STREAMLIT UI -----
 st.set_page_config("AI先輩 FAQ Bot", "🤖")
 st.title("🎓 AI先輩 – FAQチャットボット")
 
-# --------------- UTIL（安全ログ） ----------
-def safe_jsonl(path: Path, data: dict):
-    def conv(x):  # JSON が嫌う型は全部 str に
-        return x if isinstance(x, (str, int, float, bool, type(None))) else str(x)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps({k: conv(v) for k, v in data.items()},
-                           ensure_ascii=False) + "\n")
+if "hist" not in st.session_state: st.session_state.hist=[]
+for r,t in st.session_state.hist: st.chat_message(r).markdown(t)
 
-# --------------- ENV ------------------------
-load_dotenv()
-API_KEY = os.getenv("GOOGLE_API_KEY")
-if not API_KEY:
-    st.error("`.env` か Secrets に GOOGLE_API_KEY がありません"); st.stop()
-genai.configure(api_key=API_KEY)
+if q := st.chat_input("質問をどうぞ"):
+    st.chat_message("user").markdown(q)
+    st.session_state.hist.append(("user", q))
 
-# --------------- FAQ 読込＆ベクトル化 ---------
-@st.cache_resource(show_spinner="FAQ を読み込み中…")
-def load_faq(csv="faq.csv"):
-    if not Path(csv).exists():
-        st.error(f"{csv} が見つかりません"); st.stop()
-
-    df = pd.read_csv(csv)
-    if not {"question", "answer"}.issubset(df.columns):
-        st.error("faq.csv に 'question', 'answer' 列が必要"); st.stop()
-
-    vecs = [genai.embed_content(model=EMBED_MODEL,
+    q_vec = genai.embed_content(model=EMBED_MODEL,
                                 content=q,
                                 task_type="retrieval_query")["embedding"]
-            for q in df["question"]]
-
-    vecs = np.asarray(vecs, dtype="float32")
-    vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)  # L2 正規化
-    return df, vecs
-
-faq_df, faq_vecs = load_faq()
-
-# --------------- SIDEBAR --------------------
-with st.sidebar:
-    st.write(f"📄 FAQ 件数: {len(faq_df)}")
-    if st.button("FAQ 先頭 5 件を見る"):
-        st.dataframe(faq_df.head())
-    COS_THRESHOLD = st.slider("FAQ マッチ閾値 (cos)", 0.0, 1.0,
-                              COS_THRESHOLD, 0.01)
-
-# --------------- 履歴描画 --------------------
-if "hist" not in st.session_state: st.session_state.hist = []
-for r, t in st.session_state.hist:
-    st.chat_message(r).markdown(t)
-
-# --------------- メインループ -----------------
-def cosine_top_k(q_vec, k=TOP_K):
-    # NumPy だけでコサイン類似度を計算
-    q = q_vec / np.linalg.norm(q_vec)
-    sims = faq_vecs @ q
-    top_idx = sims.argsort()[-k:][::-1]
-    return sims[top_idx], top_idx
-
-if user_q := st.chat_input("質問をどうぞ"):
-    st.session_state.hist.append(("user", user_q))
-    st.chat_message("user").markdown(user_q)
-
-    # --- Embedding & FAQ 検索 --------------
-    q_vec = genai.embed_content(model=EMBED_MODEL,
-                                content=user_q,
-                                task_type="retrieval_query")["embedding"]
     q_vec = np.asarray(q_vec, dtype="float32")
-    sims, idxs = cosine_top_k(q_vec)
-    best_sim, best_idx = float(sims[0]), int(idxs[0])
+    sims, idxs = top_k(q_vec)
 
-    use_faq = best_sim >= COS_THRESHOLD
-    src_q, answer = "", ""
+    # ---- プロンプト構築 ----------------------
+    faqs = [
+        f"{i+1}. Q: {faq_df.iloc[idx]['question']}\n   A: {faq_df.iloc[idx]['answer']}"
+        for i,idx in enumerate(idxs) if sims[i] >= SIM_FLOOR
+    ]
+    prompt = (
+        "あなたは大学の頼れる先輩チャットボットです。\n"
+        "以下の候補 FAQ を読んで，質問に最も合う回答だけを選び，"
+        "その回答文だけを返答として出力してください。\n"
+        "もし該当するものが一つも無い場合は **NO_ANSWER** とだけ返してください。\n\n"
+        f"【質問】\n{q}\n\n【候補FAQ】\n" + "\n".join(faqs)
+    )
 
-    if use_faq:
-        row = faq_df.iloc[best_idx]
-        src_q, answer = row["question"], row["answer"]
+    # ---- Gemini 呼び出し --------------------
+    try:
+        rsp = genai.generate_content(
+            model=CHAT_MODEL,
+            contents=[{"role":"user","parts":[{"text":prompt}]}],
+        )
+        ans_raw = rsp.candidates[0].content.parts[0].text.strip()
+    except Exception as e:
+        ans_raw = "システムエラーで回答できませんでした。時間をおいて試してください。"
+
+    if ans_raw == "NO_ANSWER":
+        answer = "ごめん、今はその情報を持っていないんだ。ほかの先輩にも聞いてみてね。"
+        faq_hit = False
     else:
-        ctx = ""
-        if best_sim > 0.1:
-            row = faq_df.iloc[best_idx]
-            ctx = f"参考FAQ:\nQ: {row['question']}\nA: {row['answer']}\n---\n"
+        answer = f"{ans_raw}\n\n困ったらいつでもまた聞いてね。"
+        faq_hit = True
 
-        sys_prompt = ('あなたは大学の先輩チャットボット "AI先輩" です。'
-                      '質問に日本語で端的かつ丁寧に答えてください。')
-        full_prompt = f"{ctx}ユーザーの質問: {user_q}"
-
-        try:
-            rsp = genai.generate_content(
-                model=CHAT_MODEL,
-                contents=[
-                    {"role": "system", "parts": [{"text": sys_prompt}]},
-                    {"role": "user",   "parts": [{"text": full_prompt}]},
-                ],
-            )
-            answer = rsp.candidates[0].content.parts[0].text
-        except Exception as e:
-            answer = "回答生成に失敗しました。時間をおいて再度お試しください。"
-            logging.exception(e)
-
-    # --- 表示 & ログ -----------------------
     st.chat_message("assistant").markdown(answer)
     st.session_state.hist.append(("assistant", answer))
-    st.caption(f"コサイン類似度: {best_sim:.2f} / FAQマッチ: {use_faq}")
 
-    log = {
-        "ts": time.time(),
-        "question": user_q,
-        "answer": answer,
-        "faq_hit": use_faq,
-        "similarity": best_sim,
-        "faq_question": src_q,
-    }
-    safe_jsonl(CHAT_LOG, log)
-    if not use_faq:
-        safe_jsonl(UNANS_LOG, log)
+    save_jsonl(CHAT_LOG, {"ts":time.time(),"q":q,"a":answer,"faq_hit":faq_hit})
 # ────────────────────────────────────────────
 # ─────────────────────────────────────────────
