@@ -1,8 +1,5 @@
-
-import os
-import json
-import time
-import logging
+# ─────────────────  app.py  ─────────────────
+import os, json, time, logging
 from pathlib import Path
 
 import streamlit as st
@@ -12,166 +9,129 @@ import faiss
 from dotenv import load_dotenv
 import google.generativeai as genai
 
-# ------------------ CONFIG ------------------ #
-EMBED_MODEL = "models/embedding-001"      # Gemini embeddingモデル (Flashと互換)
+# ----------------- CONFIG ------------------ #
+EMBED_MODEL = "models/embedding-001"
 CHAT_MODEL  = "models/gemini-1.5-flash-latest"
-FAISS_THRESHOLD = 0.80                    # FAQマッチ判定用
+COS_THRESHOLD = 0.30          # コサイン類似度の閾値
+TOP_K = 3                     # FAQ 上位何件を見るか
 
-LOG_DIR = Path("logs")
-LOG_DIR.mkdir(exist_ok=True)
-CHAT_LOG_FILE = LOG_DIR / "chat_logs.jsonl"
-UNANSWERED_FILE = LOG_DIR / "unanswered.jsonl"
+LOG_DIR = Path("logs"); LOG_DIR.mkdir(exist_ok=True)
+CHAT_LOG_FILE      = LOG_DIR / "chat_logs.jsonl"
+UNANSWERED_LOGFILE = LOG_DIR / "unanswered.jsonl"
 
-st.set_page_config(page_title="AI先輩 FAQ Bot", page_icon="🤖", layout="centered")
+st.set_page_config("AI先輩 FAQ Bot", "🤖")
 st.title("🎓 AI先輩 – FAQチャットボット")
 
-# ------------------  UTIL ------------------ #
-# ------------------  UTIL ------------------ #
+# -------------- UTIL（安全ログ） ------------- #
 def append_jsonl(path: Path, data: dict) -> None:
-    """JSON Lines 形式で1行追記（どんな型でも安全に文字列化）"""
-    safe_data = {k: str(v) if not isinstance(v, (int, float, bool, str, type(None))) else v
-                 for k, v in data.items()}
-    # ↑ 4型以外は str() に変換
+    def to_safe(x):
+        return x if isinstance(x, (str, int, float, bool, type(None))) else str(x)
+    safe = {k: to_safe(v) for k, v in data.items()}
     with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(safe_data, ensure_ascii=False) + "\n")
+        f.write(json.dumps(safe, ensure_ascii=False) + "\n")
 
-# ------------------  LOAD ENV ------------------ #
+# -------------- 環境変数 --------------------- #
 load_dotenv()
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if not GOOGLE_API_KEY:
-    st.error("`.env` に GOOGLE_API_KEY が設定されていません。")
-    st.stop()
-genai.configure(api_key=GOOGLE_API_KEY)
+API_KEY = os.getenv("GOOGLE_API_KEY")
+if not API_KEY:
+    st.error("`.env` か Secrets に GOOGLE_API_KEY を設定してください"); st.stop()
+genai.configure(api_key=API_KEY)
 
-# ------------------  LOAD FAQ & BUILD INDEX ------------------ #
-@st.cache_resource(show_spinner="FAQ を読み込み中 ...")  # 再起動までキャッシュ
-def load_faq_index(csv_path: str = "faq.csv"):
+# -------------- FAQ 読み込み＆インデックス --- #
+@st.cache_resource(show_spinner="FAQ を読み込み中 …")
+def load_faq(csv_path="faq.csv"):
     if not Path(csv_path).exists():
-        st.error(f"{csv_path} が見つかりません。app.py と同じフォルダに配置してください。")
-        st.stop()
+        st.error(f"{csv_path} がありません"); st.stop()
 
     df = pd.read_csv(csv_path)
     if not {"question", "answer"}.issubset(df.columns):
-        st.error("`faq.csv` には 'question' と 'answer' の列が必要です。")
-        st.stop()
+        st.error("faq.csv に 'question','answer' 列が必要"); st.stop()
 
-    # Embedding
-    embeddings = []
-    for q in df["question"].tolist():
-        try:
-            emb = genai.embed_content(model=EMBED_MODEL, content=q, task_type="retrieval_query")["embedding"]
-            embeddings.append(emb)
-        except Exception as e:
-            st.error(f"Embedding 失敗: {e}")
-            st.stop()
+    # Embedding & Cosine 用前処理
+    vecs = [genai.embed_content(model=EMBED_MODEL,
+                                content=q,
+                                task_type="retrieval_query")["embedding"]
+            for q in df["question"]]
 
-    embeddings = np.array(embeddings).astype("float32")
-    dim = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dim)
-    index.add(embeddings)
+    vecs = np.array(vecs).astype("float32")
+    faiss.normalize_L2(vecs)              # ★ 正規化
+    index = faiss.IndexFlatIP(vecs.shape[1])
+    index.add(vecs)
+    return df, index
 
-    return df, index, embeddings
+faq_df, faq_index = load_faq()
 
-faq_df, faq_index, faq_embeddings = load_faq_index()
-
-# ------------------  SIDEBAR ------------------ #
+# -------------- SIDEBAR --------------------- #
 with st.sidebar:
-    st.subheader("📄 FAQ データ")
-    st.write(f"件数: {len(faq_df)}")
-    if st.button("FAQ 先頭5件を見る"):
+    st.write(f"📄 FAQ 件数 : {len(faq_df)}")
+    if st.button("最初の5件を見る"):
         st.dataframe(faq_df.head())
+    COS_THRESHOLD = st.slider("コサイン閾値", 0.0, 1.0, COS_THRESHOLD, 0.01)
 
-    st.markdown("---")
-    st.markdown("**閾値 (類似度)**")
-    FAISS_THRESHOLD = st.slider("FAQ マッチ閾値", 0.0, 1.0, FAISS_THRESHOLD, 0.01)
+# -------------- チャット履歴 ----------------- #
+if "history" not in st.session_state: st.session_state.history = []
 
-# ------------------  CHAT LOOP ------------------ #
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+for role, text in st.session_state.history:
+    st.chat_message(role).markdown(text)
 
-# Render previous messages
-for role, msg in st.session_state.chat_history:
-    box = st.chat_message(role)
-    box.markdown(msg)
+# -------------- ユーザ入力 ------------------- #
+if user_q := st.chat_input("質問をどうぞ"):
+    st.session_state.history.append(("user", user_q))
+    st.chat_message("user").markdown(user_q)
 
-# User input
-if prompt := st.chat_input("質問をどうぞ"):
-    st.session_state.chat_history.append(("user", prompt))
-    user_box = st.chat_message("user")
-    user_box.markdown(prompt)
+    # --- Embedding & 検索（コサイン） -------- #
+    uvec = genai.embed_content(model=EMBED_MODEL,
+                               content=user_q,
+                               task_type="retrieval_query")["embedding"]
+    uvec = np.asarray(uvec, dtype="float32"); faiss.normalize_L2(uvec)
+    D, I = faq_index.search(uvec[None], TOP_K)   # D はコサイン類似度
+    best_sim, best_idx = float(D[0][0]), int(I[0][0])
 
-    # Embedding & search
-    try:
-        user_emb = genai.embed_content(model=EMBED_MODEL, content=prompt, task_type="retrieval_query")["embedding"]
-    except Exception as e:
-        st.error(f"Embedding 失敗: {e}")
-        st.stop()
+    use_faq = best_sim >= COS_THRESHOLD
+    answer, src_q = "", ""
 
-    D, I = faq_index.search(np.array([user_emb]).astype("float32"), k=1)
-    similarity = 1 - D[0][0] / 2  # L2->cos 適当変換 (0~1ぐらいの目安)
-
-    answered_by_faq = similarity >= FAISS_THRESHOLD
-    response = ""
-    source_question = ""
-    if answered_by_faq:
-        source_question = faq_df.iloc[I[0][0]]["question"]
-        response = faq_df.iloc[I[0][0]]["answer"]
+    if use_faq:
+        row = faq_df.iloc[best_idx]
+        src_q, answer = row["question"], row["answer"]
     else:
-        # 検索結果をコンテキストとして Gemini に投げる
+        # ---- Gemini 生成 -------------------- #
         context = ""
-        if similarity > 0.2:  # 一応近いものがあれば
-            context = (
-                f"参考になりそうな FAQ:\n"
-                f"Q: {faq_df.iloc[I[0][0]]['question']}\n"
-                f"A: {faq_df.iloc[I[0][0]]['answer']}\n---"
-            )
-
+        if best_sim > 0.1:
+            row = faq_df.iloc[best_idx]
+            context = f"参考FAQ:\nQ: {row['question']}\nA: {row['answer']}\n---\n"
         system_prompt = (
             'あなたは大学の先輩チャットボット "AI先輩" です。'
-            'ユーザーの質問に日本語で端的かつ丁寧に答えてください。'
+            '質問に日本語で端的かつ丁寧に答えてください。'
         )
-        full_prompt = f"{context}\nユーザーの質問: {prompt}"
-
+        full_prompt = f"{context}ユーザーの質問: {user_q}"
         try:
-            gen_response = genai.generate_content(
+            resp = genai.generate_content(
                 model=CHAT_MODEL,
                 contents=[
                     {"role": "system", "parts": [{"text": system_prompt}]},
                     {"role": "user",   "parts": [{"text": full_prompt}]},
                 ],
-                safety_settings={
-                    "category": "HARM_CATEGORY_DANGEROUS",
-                    "threshold": "BLOCK_NONE",
-                },
             )
-            response = gen_response.candidates[0].content.parts[0].text
+            answer = resp.candidates[0].content.parts[0].text
         except Exception as e:
-            response = (
-                "申し訳ありません、回答生成中にエラーが発生しました。"
-                "後でもう一度お試しください。"
-            )
+            answer = "回答生成でエラーが発生しました。時間を置いて再度お試しください。"
             logging.exception(e)
 
-    # Display assistant response
-    assistant_box = st.chat_message("assistant")
-    assistant_box.markdown(response)
-    st.session_state.chat_history.append(("assistant", response))
+    # ---- 画面表示 --------------------------- #
+    st.chat_message("assistant").markdown(answer)
+    st.session_state.history.append(("assistant", answer))
+    st.caption(f"コサイン類似度: {best_sim:.2f} / FAQマッチ: {use_faq}")
 
-    # Caption for debug
-    assistant_box.caption(f"FAQ 類似度: {similarity:.2f} / マッチ: {answered_by_faq}")
-    
-    # Logging
-    log_entry = {
-        "ts": time.time(),
-        "question": prompt,
-        "answered_by_faq": answered_by_faq,
-        "similarity": similarity,
-        "faq_question": source_question,
-        "answer": response,
+    # ---- ログ書き込み ----------------------- #
+    log = {
+        "ts"       : time.time(),
+        "question" : user_q,
+        "answered_by_faq": use_faq,
+        "similarity": best_sim,
+        "faq_question": src_q,
+        "answer"    : answer,
     }
-    append_jsonl(CHAT_LOG_FILE, log_entry)
-
-    if not answered_by_faq:
-        append_jsonl(UNANSWERED_FILE, log_entry)
-
+    append_jsonl(CHAT_LOG_FILE, log)
+    if not use_faq: append_jsonl(UNANSWERED_LOGFILE, log)
+# ─────────────────────────────────────────────
         st.caption(f"（類似度: {top_similarity:.2f}, 未回答: {is_unanswered}）")
