@@ -121,10 +121,8 @@ if prompt := st.chat_input("質問を入力してください..."):
             if top_similarity >= FAISS_THRESHOLD:
                 retrieved_question = faq_questions[I[0][0]]
                 retrieved_answer = faq_answers[I[0][0]]
-                context_text = f"参考情報:
-質問: {retrieved_question}
-回答: {retrieved_answer}
----"
+                # --- 修正済み：そのままコピペで OK ---
+context_text = f"参考情報:\n質問: {retrieved_question}\n回答: {retrieved_answer}\n---"
                 is_unanswered = False
                 source_faq = retrieved_question
             else:
