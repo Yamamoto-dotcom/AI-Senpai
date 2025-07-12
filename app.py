@@ -26,10 +26,14 @@ st.set_page_config(page_title="AI先輩 FAQ Bot", page_icon="🤖", layout="cent
 st.title("🎓 AI先輩 – FAQチャットボット")
 
 # ------------------  UTIL ------------------ #
+# ------------------  UTIL ------------------ #
 def append_jsonl(path: Path, data: dict) -> None:
-    """JSON Lines 形式で1行追記"""
+    """JSON Lines 形式で1行追記（どんな型でも安全に文字列化）"""
+    safe_data = {k: str(v) if not isinstance(v, (int, float, bool, str, type(None))) else v
+                 for k, v in data.items()}
+    # ↑ 4型以外は str() に変換
     with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(data, ensure_ascii=False) + "\n")
+        f.write(json.dumps(safe_data, ensure_ascii=False) + "\n")
 
 # ------------------  LOAD ENV ------------------ #
 load_dotenv()
