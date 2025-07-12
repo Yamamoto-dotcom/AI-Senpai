@@ -2,5 +2,4 @@ streamlit>=1.33.0
 google-generativeai>=0.5.0
 pandas
 numpy
-faiss-cpu==1.7.4.post2   # ← Cloud で wheel がある版
 python-dotenv
